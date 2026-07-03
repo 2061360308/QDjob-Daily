@@ -100,6 +100,18 @@ jobs:
           git commit -m "QDjob ${{ steps.release.outputs.tag }}"
           git push origin "${{ steps.release.outputs.tag }}" --force
 
+      - name: Cleanup old version branches (keep latest 5)
+        if: steps.release.outputs.need_download == 'true'
+        run: |
+          git fetch --prune
+          OLD=$(git branch -r --list 'origin/QDjob_v*' | sed 's|origin/||' | sort -V | head -n -5)
+          if [ -n "$OLD" ]; then
+            echo "Deleting old branches: $OLD"
+            echo "$OLD" | while read branch; do
+              git push origin --delete "$branch"
+            done
+          fi
+
       - name: Update .qdjob_version on main
         if: steps.release.outputs.need_download == 'true'
         run: |
