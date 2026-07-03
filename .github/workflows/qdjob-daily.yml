@@ -56,19 +56,37 @@ jobs:
           echo "download_url=$DOWNLOAD_URL" >> $GITHUB_OUTPUT
 
           CURRENT=$(cat .qdjob_version 2>/dev/null | tr -d '[:space:]' || echo "none")
-          if [ "$CURRENT" = "$TAG" ]; then
+          if [ "$CURRENT" = "$TAG" ] && git ls-remote --heads origin "$TAG" | grep -q "$TAG"; then
             echo "need_download=false" >> $GITHUB_OUTPUT
           else
             echo "need_download=true" >> $GITHUB_OUTPUT
           fi
 
-      - name: Download and extract QDjob
-        if: steps.release.outputs.valid == 'true'
+      - name: Download QDjob from release (new version)
+        if: steps.release.outputs.need_download == 'true'
         run: |
           curl -sL -o /tmp/qdjob.zip "${{ steps.release.outputs.download_url }}"
           rm -rf /tmp/qdjob
           unzip -o /tmp/qdjob.zip -d /tmp/qdjob
           chmod +x /tmp/qdjob/QDjob
+
+      - name: Fetch QDjob from version branch (existing version)
+        if: steps.release.outputs.need_download == 'false' && steps.release.outputs.valid == 'true'
+        run: |
+          VERSION=$(cat .qdjob_version | tr -d '[:space:]')
+          if git ls-remote --heads origin "$VERSION" | grep -q "$VERSION"; then
+            git fetch origin "$VERSION"
+            rm -rf /tmp/qdjob
+            mkdir -p /tmp/qdjob
+            git archive "origin/$VERSION" | tar -x -C /tmp/qdjob/
+            chmod +x /tmp/qdjob/QDjob
+          else
+            echo "Version branch $VERSION not found, downloading from release"
+            curl -sL -o /tmp/qdjob.zip "${{ steps.release.outputs.download_url }}"
+            rm -rf /tmp/qdjob
+            unzip -o /tmp/qdjob.zip -d /tmp/qdjob
+            chmod +x /tmp/qdjob/QDjob
+          fi
 
       - name: Create version branch and commit QDjob
         if: steps.release.outputs.need_download == 'true'
@@ -86,12 +104,15 @@ jobs:
         if: steps.release.outputs.need_download == 'true'
         run: |
           git checkout main
-          echo "${{ steps.release.outputs.tag }}" > .qdjob_version
-          git add .qdjob_version
-          git config user.name "${{ env.GIT_USER }}"
-          git config user.email "${{ env.GIT_EMAIL }}"
-          git commit -m "Update to ${{ steps.release.outputs.tag }}"
-          git push origin main
+          CURRENT=$(cat .qdjob_version | tr -d '[:space:]')
+          if [ "$CURRENT" != "${{ steps.release.outputs.tag }}" ]; then
+            echo "${{ steps.release.outputs.tag }}" > .qdjob_version
+            git add .qdjob_version
+            git config user.name "${{ env.GIT_USER }}"
+            git config user.email "${{ env.GIT_EMAIL }}"
+            git commit -m "Update to ${{ steps.release.outputs.tag }}"
+            git push origin main
+          fi
 
       - name: Ensure main branch
         if: always() && steps.release.outputs.need_download == 'true'
@@ -141,3 +162,11 @@ jobs:
             git commit -m "Update logs $(date +%Y-%m-%d)" 2>/dev/null || true
             git push
           fi
+
+  workflow-keepalive:
+    if: github.event_name == 'schedule'
+    runs-on: ubuntu-latest
+    permissions:
+      actions: write
+    steps:
+      - uses: liskin/gh-workflow-keepalive@v1
