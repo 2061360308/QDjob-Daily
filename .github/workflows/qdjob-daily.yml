@@ -1,0 +1,143 @@
+name: QDjob Daily
+
+# ============================================================
+# 配置 - 直接修改此处即可
+# ============================================================
+env:
+  QDJOB_REPO:        qdjob/QDjob  # 发布主仓库不用改
+  QDJOB_ASSET:       QDjob_linux_amd64.zip  # 引用资源的名称不用更改
+  DATA_REPO:         2061360308/QDjob-Data  # 修改为你自己的数据仓库，确保仓库存在且有写入权限
+  GIT_USER:          github-actions[bot]  # 修改为你自己的 GitHub 用户名或保留默认
+  GIT_EMAIL:         github-actions[bot]@users.noreply.github.com  # 修改为你自己的 GitHub 邮箱或保留默认
+
+on:
+  schedule:
+    - cron: '30 0 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+
+    steps:
+      # ============================================================
+      # Phase 1 — 自动更新
+      # ============================================================
+
+      - name: Random delay (0-5 minutes)
+        if: github.event_name == 'schedule'
+        run: |
+          DELAY=$((RANDOM % 300))
+          echo "Sleeping for ${DELAY} seconds"
+          sleep ${DELAY}
+
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Get latest release and check version
+        id: release
+        run: |
+          RESPONSE=$(curl -sL "https://api.github.com/repos/${{ env.QDJOB_REPO }}/releases/latest")
+          TAG=$(echo "$RESPONSE" | jq -r '.tag_name // empty')
+          if [ -z "$TAG" ] || [ "$TAG" = "null" ]; then
+            echo "valid=false" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+          DOWNLOAD_URL=$(echo "$RESPONSE" | jq -r --arg name "${{ env.QDJOB_ASSET }}" '.assets[] | select(.name==$name) | .browser_download_url')
+          if [ -z "$DOWNLOAD_URL" ] || [ "$DOWNLOAD_URL" = "null" ]; then
+            echo "valid=false" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+          echo "valid=true" >> $GITHUB_OUTPUT
+          echo "tag=$TAG" >> $GITHUB_OUTPUT
+          echo "download_url=$DOWNLOAD_URL" >> $GITHUB_OUTPUT
+
+          CURRENT=$(cat .qdjob_version 2>/dev/null | tr -d '[:space:]' || echo "none")
+          if [ "$CURRENT" = "$TAG" ]; then
+            echo "need_download=false" >> $GITHUB_OUTPUT
+          else
+            echo "need_download=true" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Download and extract QDjob
+        if: steps.release.outputs.valid == 'true'
+        run: |
+          curl -sL -o /tmp/qdjob.zip "${{ steps.release.outputs.download_url }}"
+          rm -rf /tmp/qdjob
+          unzip -o /tmp/qdjob.zip -d /tmp/qdjob
+          chmod +x /tmp/qdjob/QDjob
+
+      - name: Create version branch and commit QDjob
+        if: steps.release.outputs.need_download == 'true'
+        run: |
+          git checkout --orphan "${{ steps.release.outputs.tag }}"
+          git rm -rf .
+          cp -r /tmp/qdjob/* ./
+          git config user.name "${{ env.GIT_USER }}"
+          git config user.email "${{ env.GIT_EMAIL }}"
+          git add .
+          git commit -m "QDjob ${{ steps.release.outputs.tag }}"
+          git push origin "${{ steps.release.outputs.tag }}" --force
+
+      - name: Update .qdjob_version on main
+        if: steps.release.outputs.need_download == 'true'
+        run: |
+          git checkout main
+          echo "${{ steps.release.outputs.tag }}" > .qdjob_version
+          git add .qdjob_version
+          git config user.name "${{ env.GIT_USER }}"
+          git config user.email "${{ env.GIT_EMAIL }}"
+          git commit -m "Update to ${{ steps.release.outputs.tag }}"
+          git push origin main
+
+      - name: Ensure main branch
+        if: always() && steps.release.outputs.need_download == 'true'
+        run: |
+          git checkout main 2>/dev/null || true
+          git reset --hard origin/main 2>/dev/null || true
+
+      # ============================================================
+      # Phase 2 — 执行
+      # ============================================================
+
+      - name: Prepare temp directory for execution
+        if: steps.release.outputs.valid == 'true'
+        run: |
+          rm -rf /tmp/qdjob-run
+          mkdir -p /tmp/qdjob-run
+          cp -r /tmp/qdjob/* /tmp/qdjob-run/
+
+      - name: Clone data repository into temp directory
+        if: steps.release.outputs.valid == 'true'
+        env:
+          DATA_REPO_TOKEN: ${{ secrets.DATA_REPO_TOKEN }}
+        run: |
+          rm -rf /tmp/qdjob-data
+          git clone "https://${DATA_REPO_TOKEN}@github.com/${{ env.DATA_REPO }}.git" /tmp/qdjob-data
+          cp -r /tmp/qdjob-data/* /tmp/qdjob-run/ 2>/dev/null || true
+
+      - name: Run QDjob
+        if: steps.release.outputs.valid == 'true'
+        run: |
+          cd /tmp/qdjob-run
+          ./QDjob > /dev/null 2>&1
+
+      - name: Push logs to data repository
+        if: always()
+        env:
+          DATA_REPO_TOKEN: ${{ secrets.DATA_REPO_TOKEN }}
+        run: |
+          if [ -d /tmp/qdjob-run/logs ]; then
+            rm -rf /tmp/qdjob-data-push
+            git clone "https://${DATA_REPO_TOKEN}@github.com/${{ env.DATA_REPO }}.git" /tmp/qdjob-data-push
+            cp -r /tmp/qdjob-run/logs /tmp/qdjob-data-push/
+            cd /tmp/qdjob-data-push
+            git config user.name "${{ env.GIT_USER }}"
+            git config user.email "${{ env.GIT_EMAIL }}"
+            git add .
+            git commit -m "Update logs $(date +%Y-%m-%d)" 2>/dev/null || true
+            git push
+          fi
